@@ -1,0 +1,12 @@
+﻿{
+  "display_name": "Preset Renamer",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "songyu4echo1106-code",
+  "version": "0.1.0",
+  "homePage": "https://github.com/songyu4echo1106-code/Preset-Renamer",
+  "auto_update": true
+}
