@@ -248,6 +248,11 @@
 
         const html = `
         <div id='preset-renamer-container' class='preset-renamer-container extension_container'>
+            <button type='button' class='menu_button pr-toggle' aria-expanded='false' aria-controls='pr-panel'>
+                <span class='pr-toggle-title'>Preset Renamer</span>
+                <span class='pr-toggle-state'>展开</span>
+            </button>
+            <div id='pr-panel' class='pr-panel' hidden>
             <div class='pr-title-row'>
                 <div>
                     <div class='pr-title'>Preset Renamer</div>
@@ -294,6 +299,7 @@
                     <button type='button' class='menu_button pr-batch-apply'>应用修改</button>
                 </div>
             </div>
+            </div>
         </div>`;
 
         $root = $(html);
@@ -316,6 +322,14 @@
     }
 
     function bindEvents() {
+        $root.on('click', '.pr-toggle', function () {
+            const $panel = $root.find('.pr-panel');
+            const expanded = !$panel.prop('hidden');
+            $panel.prop('hidden', expanded);
+            $(this).attr('aria-expanded', String(!expanded));
+            $(this).find('.pr-toggle-state').text(expanded ? '展开' : '收起');
+        });
+
         $root.on('input', '.pr-search-input', function () {
             state.search = $(this).val() || '';
             renderPresetList();
@@ -723,12 +737,32 @@
     }
 
     function buildPreviewBody(apiId, name, preset) {
+        const promptEntries = getPresetPromptEntries(preset);
         const rows = [
             '<div class="pr-preview-row">',
             '  <div class="pr-preview-key">预设名称</div>',
-            '  <div class="pr-preview-value"><pre class="pr-value-pre">' + escapeHtml(name) + '</pre></div>',
+            '  <div class="pr-preview-value">' + escapeHtml(name) + '</div>',
             '</div>',
         ];
+
+        if (promptEntries.length) {
+            rows.push(
+                '<div class="pr-preview-row">',
+                '  <div class="pr-preview-key">Prompt 条目</div>',
+                '  <div class="pr-preview-value pr-prompt-count">' + promptEntries.length + ' 个</div>',
+                '</div>',
+                '<div class="pr-prompt-list">' + promptEntries.map((entry, index) => {
+                    const statusText = entry.enabled === true ? '启用' : entry.enabled === false ? '停用' : '未知';
+                    const statusClass = entry.enabled === true ? 'is-enabled' : entry.enabled === false ? 'is-disabled' : 'is-unknown';
+                    const title = entry.name || ('Prompt ' + (index + 1));
+                    const content = entry.content === undefined || entry.content === null || entry.content === ''
+                        ? '<span class="pr-missing">（无文本内容）</span>'
+                        : formatPresetValue('content', entry.content);
+                    return '<details class="pr-prompt-item"><summary class="pr-prompt-summary"><span class="pr-prompt-name">' + escapeHtml(title) + '</span><span class="pr-prompt-status ' + statusClass + '">' + statusText + '</span></summary><div class="pr-prompt-content">' + content + '</div></details>';
+                }).join('') + '</div>',
+            );
+            return '<div class="pr-preview">' + rows.join('') + '</div>';
+        }
 
         for (const key of getPreviewKeys(apiId)) {
             const rawValue = preset[key];
@@ -737,10 +771,10 @@
             }
             const label = TEXT_FIELD_LABELS[key] || key;
             rows.push(
-                '<div class="pr-preview-row">',
-                '  <div class="pr-preview-key">' + escapeHtml(label) + '</div>',
-                '  <div class="pr-preview-value">' + formatPresetValue(key, rawValue) + '</div>',
-                '</div>',
+                '<details class="pr-prompt-item">',
+                '  <summary class="pr-prompt-summary"><span class="pr-prompt-name">' + escapeHtml(label) + '</span></summary>',
+                '  <div class="pr-prompt-content">' + formatPresetValue(key, rawValue) + '</div>',
+                '</details>',
             );
         }
 
@@ -749,6 +783,108 @@
         }
 
         return '<div class="pr-preview">' + rows.join('') + '</div>';
+    }
+
+    function getPresetPromptEntries(preset) {
+        const prompts = getPresetPrompts(preset);
+        const orderEntries = getPresetPromptOrder(preset);
+        const promptByIdentifier = new Map();
+
+        for (const prompt of prompts) {
+            if (!prompt || typeof prompt !== 'object') {
+                continue;
+            }
+            const identifier = getPromptIdentifier(prompt);
+            if (identifier !== undefined && identifier !== null && !promptByIdentifier.has(identifier)) {
+                promptByIdentifier.set(identifier, prompt);
+            }
+        }
+
+        const entries = [];
+        const usedPrompts = new Set();
+        for (const orderEntry of orderEntries) {
+            if (!orderEntry || typeof orderEntry !== 'object') {
+                continue;
+            }
+            const identifier = getPromptIdentifier(orderEntry);
+            const prompt = identifier === undefined || identifier === null ? undefined : promptByIdentifier.get(identifier);
+            if (prompt) {
+                usedPrompts.add(prompt);
+            }
+            const source = prompt || orderEntry;
+            const enabled = typeof orderEntry.enabled === 'boolean'
+                ? orderEntry.enabled
+                : (prompt && typeof prompt.enabled === 'boolean' ? prompt.enabled : undefined);
+            entries.push({
+                name: getPromptDisplayName(source),
+                enabled,
+                content: getPromptContent(source),
+            });
+        }
+
+        for (const prompt of prompts) {
+            if (!prompt || typeof prompt !== 'object' || usedPrompts.has(prompt)) {
+                continue;
+            }
+            entries.push({
+                name: getPromptDisplayName(prompt),
+                enabled: typeof prompt.enabled === 'boolean' ? prompt.enabled : undefined,
+                content: getPromptContent(prompt),
+            });
+        }
+        return entries;
+    }
+
+    function getPresetPrompts(preset) {
+        if (Array.isArray(preset.prompts)) {
+            return preset.prompts;
+        }
+        if (preset.prompts && typeof preset.prompts === 'object') {
+            return Object.values(preset.prompts);
+        }
+        return [];
+    }
+
+    function getPresetPromptOrder(preset) {
+        const promptOrder = preset.prompt_order;
+        if (Array.isArray(promptOrder)) {
+            const groups = promptOrder.filter(item => item && Array.isArray(item.order));
+            if (groups.length) {
+                const selected = groups.find(item => Number(item.character_id) === 100001) || groups[0];
+                return selected.order;
+            }
+            return promptOrder.every(item => item && typeof item === 'object') ? promptOrder : [];
+        }
+
+        if (promptOrder && typeof promptOrder === 'object') {
+            if (Array.isArray(promptOrder.order)) {
+                return promptOrder.order;
+            }
+            const preferred = promptOrder[100001] || promptOrder['100001'];
+            if (Array.isArray(preferred)) {
+                return preferred;
+            }
+            return Object.values(promptOrder).find(Array.isArray) || [];
+        }
+        return [];
+    }
+
+    function getPromptIdentifier(item) {
+        return item.identifier !== undefined ? item.identifier : (item.id !== undefined ? item.id : item.name);
+    }
+
+    function getPromptDisplayName(item) {
+        return item.name || item.identifier || item.id || '';
+    }
+
+    function getPromptContent(item) {
+        if (item.content !== undefined) {
+            return item.content;
+        }
+        if (item.prompt !== undefined) {
+            return item.prompt;
+        }
+        return item.text;
     }
 
     function showModal(title, body, wide = false) {
@@ -884,32 +1020,7 @@
             return;
         }
 
-        const preset = getPresetByNameCompat(manager, oldName);
-        if (!preset || typeof preset !== 'object') {
-            throw new Error('找不到预设：' + oldName);
-        }
-
-        if (typeof manager.savePreset === 'function' && typeof manager.deletePreset === 'function') {
-            let result = manager.savePreset(newName, preset);
-            if (result && typeof result.then === 'function') {
-                await result;
-            }
-            result = manager.deletePreset(oldName);
-            if (result && typeof result.then === 'function') {
-                await result;
-            }
-            return;
-        }
-
-        if (typeof manager.updatePreset === 'function') {
-            const updated = manager.updatePreset(oldName, newName, preset);
-            if (updated && typeof updated.then === 'function') {
-                await updated;
-            }
-            return;
-        }
-
-        throw new Error('当前预设管理器不支持重命名。');
+        throw new Error('当前预设管理器不支持安全重命名，已保留原预设。');
     }
 
     function renderManualEditor() {
