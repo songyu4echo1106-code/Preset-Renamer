@@ -21,6 +21,12 @@
 
     const ADVANCED_API_IDS = new Set(['context', 'instruct', 'sysprompt', 'reasoning']);
 
+    // 显示名称存储在文件内部 name 字段的预设类型（重命名时必须同步改写该字段）。
+    const INNER_NAME_APIS = new Set(['context', 'instruct', 'sysprompt', 'reasoning']);
+
+    // 无法通过公开接口更新当前预设名称指针的类型，拒绝重命名其当前激活预设。
+    const ACTIVE_POINTER_UNSUPPORTED_APIS = new Set(['kobold', 'novel']);
+
     const TEXT_FIELD_LABELS = {
         'content': '主要文本 / content',
         'post_history': '后置历史文本 / post_history',
@@ -125,8 +131,6 @@
     let $typeSelect = null;
     let $searchInput = null;
     let $batchPanel = null;
-    let $manualEditor = null;
-    let $affixRow = null;
     let $affixInput = null;
     let $batchPreview = null;
     let $batchErrors = null;
@@ -269,7 +273,6 @@
                 <span class='pr-selection-count'>已选择：0</span>
                 <button type='button' class='menu_button pr-open-batch'>批量重命名</button>
             </div>
-            <div class='pr-list' aria-live='polite'></div>
             <div class='pr-batch-panel' hidden>
                 <div class='pr-batch-heading'>批量重命名</div>
                 <div class='pr-batch-options'>
@@ -281,16 +284,11 @@
                         <input type='radio' name='pr-batch-mode' value='suffix' />
                         <span>添加后缀</span>
                     </label>
-                    <label class='pr-radio-label'>
-                        <input type='radio' name='pr-batch-mode' value='manual' />
-                        <span>逐个指定新名称</span>
-                    </label>
                 </div>
                 <div class='pr-affix-row'>
                     <label class='pr-field-label' for='pr-affix-input'>前缀 / 后缀内容</label>
                     <input id='pr-affix-input' type='text' class='text_pole pr-affix-input' placeholder='例如：RP-' />
                 </div>
-                <div class='pr-manual-editor' hidden></div>
                 <div class='pr-batch-errors' role='alert' hidden></div>
                 <div class='pr-batch-preview-title'>预览：</div>
                 <div class='pr-batch-preview'></div>
@@ -299,6 +297,7 @@
                     <button type='button' class='menu_button pr-batch-apply'>应用修改</button>
                 </div>
             </div>
+            <div class='pr-list' aria-live='polite'></div>
             </div>
         </div>`;
 
@@ -313,8 +312,6 @@
         $typeSelect = $root.find('.pr-type-select');
         $searchInput = $root.find('.pr-search-input');
         $batchPanel = $root.find('.pr-batch-panel');
-        $manualEditor = $root.find('.pr-manual-editor');
-        $affixRow = $root.find('.pr-affix-row');
         $affixInput = $root.find('.pr-affix-input');
         $batchPreview = $root.find('.pr-batch-preview');
         $batchErrors = $root.find('.pr-batch-errors');
@@ -393,7 +390,6 @@
         });
 
         $root.on('input', '.pr-affix-input', renderBatchPreview);
-        $root.on('input', '.pr-manual-input', renderBatchPreview);
     }
     function bindGlobalEvents() {
         const context = getContext();
@@ -995,6 +991,218 @@
         });
     }
 
+    function deepEqual(a, b) {
+        if (Object.is(a, b)) {
+            return true;
+        }
+        if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {
+            return false;
+        }
+        if (Array.isArray(a) !== Array.isArray(b)) {
+            return false;
+        }
+        if (Array.isArray(a)) {
+            if (a.length !== b.length) {
+                return false;
+            }
+            for (let i = 0; i < a.length; i++) {
+                if (!deepEqual(a[i], b[i])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        const aKeys = Object.keys(a).filter(key => a[key] !== undefined);
+        const bKeys = Object.keys(b).filter(key => b[key] !== undefined);
+        if (aKeys.length !== bKeys.length) {
+            return false;
+        }
+        for (const key of aKeys) {
+            if (!Object.prototype.hasOwnProperty.call(b, key) || !deepEqual(a[key], b[key])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function parseDiskPresetFromArrays(contents, names, name) {
+        if (!Array.isArray(contents) || !Array.isArray(names)) {
+            return undefined;
+        }
+        const index = names.indexOf(name);
+        if (index < 0 || index >= contents.length) {
+            return undefined;
+        }
+        try {
+            return JSON.parse(contents[index]);
+        } catch {
+            return undefined;
+        }
+    }
+
+    function findDiskPresetByName(list, name) {
+        if (!Array.isArray(list)) {
+            return undefined;
+        }
+        return list.find(item => item && typeof item === 'object' && item.name === name);
+    }
+
+    async function fetchDiskPreset(apiId, name) {
+        const context = getContext();
+        if (!context || typeof context.getRequestHeaders !== 'function') {
+            throw new Error('无法获取请求头。');
+        }
+        const response = await fetch('/api/settings/get', {
+            method: 'POST',
+            headers: context.getRequestHeaders(),
+            body: '{}',
+        });
+        if (!response.ok) {
+            throw new Error('HTTP ' + response.status);
+        }
+        const data = await response.json();
+        switch (apiId) {
+            case 'openai':
+                return parseDiskPresetFromArrays(data.openai_settings, data.openai_setting_names, name);
+            case 'kobold':
+                return parseDiskPresetFromArrays(data.koboldai_settings, data.koboldai_setting_names, name);
+            case 'novel':
+                return parseDiskPresetFromArrays(data.novelai_settings, data.novelai_setting_names, name);
+            case 'textgenerationwebui':
+                return parseDiskPresetFromArrays(data.textgenerationwebui_presets, data.textgenerationwebui_preset_names, name);
+            case 'instruct':
+                return findDiskPresetByName(data.instruct, name);
+            case 'context':
+                return findDiskPresetByName(data.context, name);
+            case 'sysprompt':
+                return findDiskPresetByName(data.sysprompt, name);
+            case 'reasoning':
+                return findDiskPresetByName(data.reasoning, name);
+            default:
+                return undefined;
+        }
+    }
+
+    function getLegacyBlockReason(apiId, content) {
+        if (apiId === 'instruct' && content.system_prompt) {
+            return '该 instruct 预设包含旧版 system_prompt 字段，保存时 SillyTavern 会触发迁移并修改内容。为避免数据变化已拒绝重命名，请先在 SillyTavern 中选中并重新保存该预设完成迁移。';
+        }
+        if (apiId === 'novel' && content.presetVersion === 3 && content.parameters && typeof content.parameters === 'object') {
+            return '该 NovelAI 预设是旧版格式（presetVersion 3），保存时 SillyTavern 会自动转换并修改内容。为避免数据变化已拒绝重命名，请先在 SillyTavern 中选中并重新保存该预设完成格式升级。';
+        }
+        return '';
+    }
+
+    function getActivePointerTarget(apiId) {
+        const context = getContext();
+        if (!context) {
+            return null;
+        }
+        switch (apiId) {
+            case 'openai':
+                return context.chatCompletionSettings
+                    ? { settings: context.chatCompletionSettings, key: 'preset_settings_openai' }
+                    : null;
+            case 'textgenerationwebui':
+                return context.textCompletionSettings
+                    ? { settings: context.textCompletionSettings, key: 'preset' }
+                    : null;
+            case 'context':
+                return context.powerUserSettings && context.powerUserSettings.context
+                    ? { settings: context.powerUserSettings.context, key: 'preset' }
+                    : null;
+            case 'instruct':
+                return context.powerUserSettings && context.powerUserSettings.instruct
+                    ? { settings: context.powerUserSettings.instruct, key: 'preset' }
+                    : null;
+            case 'sysprompt':
+                return context.powerUserSettings && context.powerUserSettings.sysprompt
+                    ? { settings: context.powerUserSettings.sysprompt, key: 'name' }
+                    : null;
+            case 'reasoning':
+                return context.powerUserSettings && context.powerUserSettings.reasoning
+                    ? { settings: context.powerUserSettings.reasoning, key: 'name' }
+                    : null;
+            default:
+                return null;
+        }
+    }
+
+    function getOptionForPreset(manager, name) {
+        return $(manager.select).find('option').filter(function () {
+            return $(this).text() === name;
+        });
+    }
+
+    function appendPresetEntry(manager, name, content) {
+        const { presets, preset_names } = manager.getPresetList();
+        if (!Array.isArray(presets) || !preset_names) {
+            throw new Error('内部预设列表不可用。');
+        }
+        presets.push(content);
+        if (Array.isArray(preset_names)) {
+            preset_names.push(name);
+            $(manager.select).append($('<option></option>', { value: name, text: name }));
+        } else {
+            preset_names[name] = presets.length - 1;
+            $(manager.select).append($('<option></option>', { value: String(presets.length - 1), text: name }));
+        }
+    }
+
+    function renameEntryInPlace(manager, oldName, newName, content) {
+        const { presets, preset_names } = manager.getPresetList();
+        if (!Array.isArray(presets) || !preset_names) {
+            throw new Error('内部预设列表不可用。');
+        }
+        if (Array.isArray(preset_names)) {
+            const index = preset_names.indexOf(oldName);
+            if (index < 0) {
+                throw new Error('内部列表中找不到原预设。');
+            }
+            preset_names[index] = newName;
+            presets[index] = content;
+            getOptionForPreset(manager, oldName).val(newName).text(newName);
+        } else {
+            const index = preset_names[oldName];
+            if (index === undefined) {
+                throw new Error('内部列表中找不到原预设。');
+            }
+            delete preset_names[oldName];
+            preset_names[newName] = index;
+            presets[index] = content;
+            getOptionForPreset(manager, oldName).text(newName);
+        }
+    }
+
+    function ensurePresetEntry(manager, name, content) {
+        if (getPresetNamesFromManager(manager).includes(name)) {
+            return;
+        }
+        appendPresetEntry(manager, name, content);
+    }
+
+    async function postDeletePresetFile(apiId, name) {
+        const context = getContext();
+        const response = await fetch('/api/presets/delete', {
+            method: 'POST',
+            headers: context.getRequestHeaders(),
+            body: JSON.stringify({ name, apiId }),
+        });
+        return response.ok;
+    }
+
+    async function emitRenameEvent(eventTypeKey, payload) {
+        try {
+            const context = getContext();
+            const eventName = context && context.eventTypes ? context.eventTypes[eventTypeKey] : null;
+            if (eventName && context.eventSource && typeof context.eventSource.emit === 'function') {
+                await context.eventSource.emit(eventName, payload);
+            }
+        } catch (error) {
+            console.warn(LOG_TAG, '重命名事件发送失败（不影响结果）', error);
+        }
+    }
+
     async function renamePreset(apiId, oldName, newName) {
         const manager = getManagerOrThrow(apiId);
         const filenameError = isSafeFilename(newName);
@@ -1003,44 +1211,101 @@
         }
 
         const names = getPresetNamesFromManager(manager);
+        if (!names.includes(oldName)) {
+            throw new Error('找不到目标预设：' + oldName);
+        }
         const duplicate = names.find(name => name !== oldName && normalizeName(name) === normalizeName(newName));
         if (duplicate) {
             throw new Error('已存在同名预设：' + duplicate);
         }
-
         if (normalizeName(newName) === normalizeName(oldName)) {
             return;
         }
 
-        if (typeof manager.renamePreset === 'function') {
-            const result = manager.renamePreset(oldName, newName);
-            if (result && typeof result.then === 'function') {
-                await result;
+        if (typeof manager.getCompletionPresetByName !== 'function'
+            || typeof manager.savePreset !== 'function'
+            || typeof manager.deletePreset !== 'function'
+            || typeof manager.getPresetList !== 'function') {
+            throw new Error('当前 SillyTavern 版本不支持后台重命名，已保留原预设。');
+        }
+
+        const isActiveTarget = manager.getSelectedPresetName() === oldName;
+        if (isActiveTarget && ACTIVE_POINTER_UNSUPPORTED_APIS.has(apiId)) {
+            throw new Error('暂不支持重命名当前正在使用的 Kobold/Novel 预设（无法可靠更新名称指针）。请先在 SillyTavern 中切换到其他预设，再对它重命名。');
+        }
+        const pointerTarget = isActiveTarget ? getActivePointerTarget(apiId) : null;
+        if (isActiveTarget && !pointerTarget) {
+            throw new Error('当前 SillyTavern 版本无法安全更新当前预设的名称指针，已拒绝重命名当前正在使用的预设。请先切换到其他预设再重命名。');
+        }
+
+        const stored = manager.getCompletionPresetByName(oldName);
+        if (!stored || typeof stored !== 'object') {
+            throw new Error('无法读取目标预设的存储内容，已取消。');
+        }
+        const legacyBlock = getLegacyBlockReason(apiId, stored);
+        if (legacyBlock) {
+            throw new Error(legacyBlock);
+        }
+
+        const content = structuredClone(stored);
+        if (INNER_NAME_APIS.has(apiId)) {
+            content.name = newName;
+        }
+
+        try {
+            await manager.savePreset(newName, content, { skipUpdate: true });
+        } catch (error) {
+            const reason = error && error.message ? error.message : String(error);
+            throw new Error('保存新预设失败：' + reason + '。原预设未受影响。');
+        }
+
+        let diskContent;
+        try {
+            diskContent = await fetchDiskPreset(apiId, newName);
+        } catch (error) {
+            throw new Error('新预设已保存，但校验时重新读取失败（' + error.message + '）。已中止，未删除原预设。');
+        }
+        if (!diskContent || typeof diskContent !== 'object') {
+            throw new Error('新预设保存后未能从磁盘读到。已中止，未删除原预设。');
+        }
+        if (!deepEqual(diskContent, JSON.parse(JSON.stringify(content)))) {
+            throw new Error('新预设的磁盘内容与原预设不一致。已中止，未删除原预设。');
+        }
+
+        await emitRenameEvent('PRESET_RENAMED_BEFORE', { apiId, oldName, newName });
+
+        let deleteOk = false;
+        try {
+            if (isActiveTarget) {
+                renameEntryInPlace(manager, oldName, newName, content);
+                pointerTarget.settings[pointerTarget.key] = newName;
+                const context = getContext();
+                if (context && typeof context.saveSettingsDebounced === 'function') {
+                    context.saveSettingsDebounced();
+                }
+                deleteOk = await postDeletePresetFile(apiId, oldName);
+            } else {
+                deleteOk = await manager.deletePreset(oldName);
             }
-            return;
+        } catch (deleteError) {
+            deleteOk = false;
         }
 
-        throw new Error('当前预设管理器不支持安全重命名，已保留原预设。');
-    }
-
-    function renderManualEditor() {
-        $manualEditor.empty();
-        for (const name of state.batchNames) {
-            const $row = $('<div></div>', { class: 'pr-manual-row' });
-            const $old = $('<div></div>', {
-                class: 'pr-manual-old-name',
-                text: name,
-                title: name,
-            });
-            const $input = $('<input>', {
-                type: 'text',
-                class: 'text_pole pr-manual-input',
-                'data-old-name': name,
-                value: name,
-            });
-            $row.append($old, $input);
-            $manualEditor.append($row);
+        if (!deleteOk) {
+            try {
+                ensurePresetEntry(manager, oldName, stored);
+                ensurePresetEntry(manager, newName, content);
+            } catch (restoreError) {
+                console.warn(LOG_TAG, '恢复预设条目失败', restoreError);
+            }
+            throw new Error('新预设已保存并校验通过，但删除旧预设失败，可能出现新旧并存（' + oldName + ' / ' + newName + '）。请检查后手动处理旧预设。');
         }
+
+        if (!isActiveTarget) {
+            appendPresetEntry(manager, newName, content);
+        }
+
+        await emitRenameEvent('PRESET_RENAMED', { apiId, oldName, newName });
     }
 
     function openBatchPanel() {
@@ -1052,7 +1317,6 @@
 
         state.batchNames = names.slice();
         state.batchMode = 'prefix';
-        renderManualEditor();
         updateBatchModeVisibility();
         $batchPanel.prop('hidden', false);
         renderBatchPreview();
@@ -1070,26 +1334,15 @@
         $root.find('input[name="pr-batch-mode"]').each(function () {
             $(this).prop('checked', $(this).val() === mode);
         });
-        $affixRow.toggle(mode === 'prefix' || mode === 'suffix');
-        $manualEditor.toggle(mode === 'manual');
     }
 
     function getBatchPlan() {
         const mode = state.batchMode || 'prefix';
         const affix = String($affixInput.val() == null ? '' : $affixInput.val());
-        const manualInputs = $manualEditor.find('.pr-manual-input').toArray();
         const existing = getPresetNamesFromManager(getCurrentManager());
 
-        const plan = state.batchNames.map((oldName, index) => {
-            let newName;
-            if (mode === 'manual') {
-                const input = manualInputs[index];
-                newName = input
-                    ? String($(input).val() == null ? '' : $(input).val()).trim()
-                    : oldName;
-            } else {
-                newName = mode === 'prefix' ? affix + oldName : oldName + affix;
-            }
+        const plan = state.batchNames.map((oldName) => {
+            const newName = mode === 'prefix' ? affix + oldName : oldName + affix;
 
             let error = isSafeFilename(newName);
             if (!error && normalizeName(newName) === normalizeName(oldName)) {
@@ -1181,16 +1434,29 @@
         updateSelectionCount();
         $root.find('.pr-batch-apply').prop('disabled', true);
 
+        const succeeded = [];
         try {
             for (const item of plan) {
                 await renamePreset(state.apiId, item.oldName, item.newName);
                 state.selected.delete(item.oldName);
                 state.selected.add(item.newName);
+                succeeded.push(item);
             }
-            toast('success', '已重命名 ' + plan.length + ' 个预设。');
+            toast('success', '已重命名 ' + succeeded.length + ' 个预设。');
             closeBatchPanel();
         } catch (error) {
-            toast('error', error.message || '批量重命名失败。');
+            const failedItem = plan[succeeded.length];
+            const unprocessed = plan.length - succeeded.length - (failedItem ? 1 : 0);
+            let message = failedItem
+                ? '重命名「' + failedItem.oldName + '」失败：' + (error.message || '未知错误')
+                : '批量重命名失败：' + (error.message || '未知错误');
+            if (succeeded.length) {
+                message += ' 已成功 ' + succeeded.length + ' 个（' + succeeded.map(item => item.newName).join('、') + '）。';
+            }
+            if (unprocessed > 0) {
+                message += ' 其余 ' + unprocessed + ' 个未处理。';
+            }
+            toast('error', message);
             renderBatchPreview();
         } finally {
             state.applying = false;
