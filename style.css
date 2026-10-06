@@ -112,7 +112,14 @@
 .pr-row-actions {
     display: flex;
     flex-shrink: 0;
+    flex-wrap: wrap;
     gap: 6px;
+}
+
+.preset-renamer-container .menu_button:not(.pr-toggle),
+.pr-modal-dialog .menu_button {
+    width: auto;
+    flex: 0 0 auto;
 }
 
 .pr-btn {
@@ -242,6 +249,7 @@
 .pr-batch-actions,
 .pr-modal-actions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: 8px;
     margin-top: 4px;
@@ -433,15 +441,14 @@
     }
 
     .pr-selection-toolbar {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
         gap: 6px;
     }
 
     .pr-selection-count {
         margin-left: 0;
-    }
-
-    .pr-open-batch {
-        flex: 1 1 100%;
     }
 
     .pr-list {
